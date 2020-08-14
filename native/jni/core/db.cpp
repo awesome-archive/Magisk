@@ -6,10 +6,10 @@
 #include <dlfcn.h>
 #include <sys/stat.h>
 
-#include <magisk.h>
-#include <db.h>
-#include <daemon.h>
-#include <utils.h>
+#include <magisk.hpp>
+#include <db.hpp>
+#include <daemon.hpp>
+#include <utils.hpp>
 
 #define DB_VERSION 10
 
@@ -56,10 +56,10 @@ static void (*android_update_LD_LIBRARY_PATH)(const char *ld_library_path);
 	*(void **) &(arg) = f; \
 }
 
-#if defined(__aarch64__) || defined(__x86_64__)
-constexpr char apex_path[] = ":/apex/com.android.runtime/lib64";
+#ifdef __LP64__
+constexpr char apex_path[] = "/apex/com.android.runtime/lib64:/apex/com.android.art/lib64:";
 #else
-constexpr char apex_path[] = ":/apex/com.android.runtime/lib";
+constexpr char apex_path[] = "/apex/com.android.runtime/lib:/apex/com.android.art/lib:";
 #endif
 
 static int dl_init = 0;
@@ -80,15 +80,14 @@ static bool dload_sqlite() {
 
 		// Inject APEX into LD_LIBRARY_PATH
 		char ld_path[4096];
-		android_get_LD_LIBRARY_PATH(ld_path, sizeof(ld_path));
-		int len = strlen(ld_path);
-		strcpy(ld_path + len, apex_path);
+		memcpy(ld_path, apex_path, sizeof(apex_path));
+		constexpr int len = sizeof(apex_path) - 1;
+		android_get_LD_LIBRARY_PATH(ld_path + len, sizeof(ld_path) - len);
 		android_update_LD_LIBRARY_PATH(ld_path);
 		sqlite = dlopen("libsqlite.so", RTLD_LAZY);
 
 		// Revert LD_LIBRARY_PATH just in case
-		ld_path[len] = '\0';
-		android_update_LD_LIBRARY_PATH(ld_path);
+		android_update_LD_LIBRARY_PATH(ld_path + len);
 	}
 	DLERR(sqlite);
 
@@ -116,7 +115,7 @@ db_settings::db_settings() {
 	data[ROOT_ACCESS] = ROOT_ACCESS_APPS_AND_ADB;
 	data[SU_MULTIUSER_MODE] = MULTIUSER_MODE_OWNER_ONLY;
 	data[SU_MNT_NS] = NAMESPACE_MODE_REQUESTER;
-	data[HIDE_CONFIG] = true;
+	data[HIDE_CONFIG] = false;
 }
 
 int db_settings::getKeyIdx(string_view key) const {

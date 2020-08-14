@@ -6,178 +6,151 @@ import android.content.pm.PackageManager
 import android.content.res.Resources
 import android.graphics.drawable.Drawable
 import android.os.CountDownTimer
-import com.topjohnwu.magisk.BuildConfig
-import com.topjohnwu.magisk.Config
-import com.topjohnwu.magisk.Const
+import androidx.databinding.Bindable
+import androidx.lifecycle.viewModelScope
+import com.topjohnwu.magisk.BR
 import com.topjohnwu.magisk.R
-import com.topjohnwu.magisk.base.viewmodel.BaseViewModel
-import com.topjohnwu.magisk.data.database.PolicyDao
-import com.topjohnwu.magisk.databinding.ComparableRvItem
-import com.topjohnwu.magisk.extensions.now
-import com.topjohnwu.magisk.model.entity.MagiskPolicy
+import com.topjohnwu.magisk.core.Config
+import com.topjohnwu.magisk.core.magiskdb.PolicyDao
+import com.topjohnwu.magisk.core.model.MagiskPolicy.Companion.ALLOW
+import com.topjohnwu.magisk.core.model.MagiskPolicy.Companion.DENY
+import com.topjohnwu.magisk.core.su.SuRequestHandler
+import com.topjohnwu.magisk.core.utils.BiometricHelper
 import com.topjohnwu.magisk.model.entity.recycler.SpinnerRvItem
-import com.topjohnwu.magisk.model.entity.toPolicy
 import com.topjohnwu.magisk.model.events.DieEvent
-import com.topjohnwu.magisk.utils.BiometricHelper
-import com.topjohnwu.magisk.utils.DiffObservableList
-import com.topjohnwu.magisk.utils.KObservableField
-import com.topjohnwu.magisk.utils.SuConnector
+import com.topjohnwu.magisk.ui.base.BaseViewModel
+import com.topjohnwu.magisk.utils.set
+import com.topjohnwu.superuser.internal.UiThreadHandler
+import kotlinx.coroutines.launch
 import me.tatarka.bindingcollectionadapter2.BindingListViewAdapter
 import me.tatarka.bindingcollectionadapter2.ItemBinding
-import timber.log.Timber
-import java.io.IOException
-import java.util.concurrent.TimeUnit.*
+import java.util.concurrent.TimeUnit.SECONDS
 
 class SuRequestViewModel(
-    private val packageManager: PackageManager,
+    private val pm: PackageManager,
     private val policyDB: PolicyDao,
     private val timeoutPrefs: SharedPreferences,
-    private val resources: Resources
+    private val res: Resources
 ) : BaseViewModel() {
 
-    val icon = KObservableField<Drawable?>(null)
-    val title = KObservableField("")
-    val packageName = KObservableField("")
+    @get:Bindable
+    var icon: Drawable? = null
+        set(value) = set(value, field, { field = it }, BR.icon)
 
-    val denyText = KObservableField(resources.getString(R.string.deny))
-    val warningText = KObservableField<CharSequence>(resources.getString(R.string.su_warning))
+    @get:Bindable
+    var title = ""
+        set(value) = set(value, field, { field = it }, BR.title)
 
-    val selectedItemPosition = KObservableField(0)
+    @get:Bindable
+    var packageName = ""
+        set(value) = set(value, field, { field = it }, BR.packageName)
 
-    private val items = DiffObservableList(ComparableRvItem.callback)
-    private val itemBinding = ItemBinding.of<ComparableRvItem<*>> { binding, _, item ->
-        item.bind(binding)
-    }
+    @get:Bindable
+    var denyText = res.getString(R.string.deny)
+        set(value) = set(value, field, { field = it }, BR.denyText)
 
-    val adapter = BindingListViewAdapter<ComparableRvItem<*>>(1).apply {
-        itemBinding = this@SuRequestViewModel.itemBinding
+    @get:Bindable
+    var warningText = res.getString(R.string.su_warning)
+        set(value) = set(value, field, { field = it }, BR.warningText)
+
+    @get:Bindable
+    var selectedItemPosition = 0
+        set(value) = set(value, field, { field = it }, BR.selectedItemPosition)
+
+    @get:Bindable
+    var grantEnabled = false
+        set(value) = set(value, field, { field = it }, BR.grantEnabled)
+
+    private val items = res.getStringArray(R.array.allow_timeout).map { SpinnerRvItem(it) }
+    val adapter = BindingListViewAdapter<SpinnerRvItem>(1).apply {
+        itemBinding = ItemBinding.of { binding, _, item ->
+            item.bind(binding)
+        }
         setItems(items)
     }
 
-    private val cancelTasks = mutableListOf<() -> Unit>()
-
-    private lateinit var timer: CountDownTimer
-    private lateinit var policy: MagiskPolicy
-    private lateinit var connector: SuConnector
-
-    private fun cancelTimer() {
-        timer.cancel()
-        denyText.value = resources.getString(R.string.deny)
-    }
+    private val handler = Handler()
 
     fun grantPressed() {
-        cancelTimer()
+        handler.cancelTimer()
         if (BiometricHelper.isEnabled) {
             withView {
                 BiometricHelper.authenticate(this) {
-                    handleAction(MagiskPolicy.ALLOW)
+                    handler.respond(ALLOW)
                 }
             }
         } else {
-            handleAction(MagiskPolicy.ALLOW)
+            handler.respond(ALLOW)
         }
     }
 
     fun denyPressed() {
-        handleAction(MagiskPolicy.DENY)
-        timer.cancel()
+        handler.respond(DENY)
     }
 
     fun spinnerTouched(): Boolean {
-        cancelTimer()
+        handler.cancelTimer()
         return false
     }
 
-    fun handleRequest(intent: Intent): Boolean {
-        val socketName = intent.getStringExtra("socket") ?: return false
-
-        try {
-            connector = Connector(socketName)
-            val map = connector.readRequest()
-            val uid = map["uid"]?.toIntOrNull() ?: return false
-            policy = uid.toPolicy(packageManager)
-        } catch (e: Exception) {
-            Timber.e(e)
-            return false
+    fun handleRequest(intent: Intent) {
+        viewModelScope.launch {
+            if (!handler.start(intent))
+                DieEvent().publish()
         }
-
-        // Never allow com.topjohnwu.magisk (could be malware)
-        if (policy.packageName == BuildConfig.APPLICATION_ID)
-            return false
-
-        when (Config.suAutoReponse) {
-            Config.Value.SU_AUTO_DENY -> {
-                handleAction(MagiskPolicy.DENY, 0)
-                return true
-            }
-            Config.Value.SU_AUTO_ALLOW -> {
-                handleAction(MagiskPolicy.ALLOW, 0)
-                return true
-            }
-        }
-
-        showUI()
-        return true
     }
 
-    private fun showUI() {
-        resources.getStringArray(R.array.allow_timeout)
-            .map { SpinnerRvItem(it) }
-            .let { items.update(it) }
+    private inner class Handler : SuRequestHandler(pm, policyDB) {
 
-        icon.value = policy.applicationInfo.loadIcon(packageManager)
-        title.value = policy.appName
-        packageName.value = policy.packageName
-        selectedItemPosition.value = timeoutPrefs.getInt(policy.packageName, 0)
+        private lateinit var timer: CountDownTimer
 
-        val millis = SECONDS.toMillis(Config.suDefaultTimeout.toLong())
-        timer = object : CountDownTimer(millis, 1000) {
+        fun respond(action: Int) {
+            timer.cancel()
+
+            val pos = selectedItemPosition
+            timeoutPrefs.edit().putInt(policy.packageName, pos).apply()
+            respond(action, Config.Value.TIMEOUT_LIST[pos])
+
+            // Kill activity after response
+            DieEvent().publish()
+        }
+
+        fun cancelTimer() {
+            timer.cancel()
+            denyText = res.getString(R.string.deny)
+        }
+
+        override fun onStart() {
+            icon = policy.applicationInfo.loadIcon(pm)
+            title = policy.appName
+            packageName = policy.packageName
+            UiThreadHandler.handler.post {
+                // Delay is required to properly do selection
+                selectedItemPosition = timeoutPrefs.getInt(policy.packageName, 0)
+            }
+
+            // Set timer
+            val millis = SECONDS.toMillis(Config.suDefaultTimeout.toLong())
+            timer = SuTimer(millis, 1000).apply { start() }
+        }
+
+        private inner class SuTimer(
+            private val millis: Long,
+            interval: Long
+        ) : CountDownTimer(millis, interval) {
+
             override fun onTick(remains: Long) {
-                denyText.value = "${resources.getString(R.string.deny)} (${remains / 1000})"
+                if (!grantEnabled && remains <= millis - 1000) {
+                    grantEnabled = true
+                }
+                denyText = "${res.getString(R.string.deny)} (${(remains / 1000) + 1})"
             }
 
             override fun onFinish() {
-                denyText.value = resources.getString(R.string.deny)
-                handleAction(MagiskPolicy.DENY)
+                denyText = res.getString(R.string.deny)
+                respond(DENY)
             }
-        }
-        timer.start()
-        cancelTasks.add { cancelTimer() }
-    }
 
-    private fun handleAction() {
-        connector.response()
-        cancelTasks.forEach { it() }
-        DieEvent().publish()
-    }
-
-    private fun handleAction(action: Int) {
-        val pos = selectedItemPosition.value
-        timeoutPrefs.edit().putInt(policy.packageName, pos).apply()
-        handleAction(action, Config.Value.TIMEOUT_LIST[pos])
-    }
-
-    private fun handleAction(action: Int, time: Int) {
-        val until = if (time > 0)
-            MILLISECONDS.toSeconds(now) + MINUTES.toSeconds(time.toLong())
-        else
-            time.toLong()
-
-        policy.policy = action
-        policy.until = until
-        policy.uid = policy.uid % 100000 + Const.USER_ID * 100000
-
-        if (until >= 0)
-            policyDB.update(policy).blockingAwait()
-
-        handleAction()
-    }
-
-    private inner class Connector @Throws(Exception::class)
-    internal constructor(name: String) : SuConnector(name) {
-        @Throws(IOException::class)
-        override fun onResponse() {
-            out.writeInt(policy.policy)
         }
     }
 

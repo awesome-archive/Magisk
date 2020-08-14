@@ -1,21 +1,17 @@
 #include <sys/mount.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <unistd.h>
 #include <libgen.h>
-#include <string.h>
 
-#include <utils.h>
-#include <magisk.h>
-#include <daemon.h>
-#include <selinux.h>
-#include <flags.h>
+#include <utils.hpp>
+#include <magisk.hpp>
+#include <daemon.hpp>
+#include <selinux.hpp>
+#include <flags.hpp>
 
-using namespace std::literals;
+using namespace std;
 
 [[noreturn]] static void usage() {
 	fprintf(stderr,
-FULL_VER(Magisk) R"EOF( multi-call binary
+R"EOF(Magisk - Multi-purpose Utility
 
 Usage: magisk [applet [arguments]...]
    or: magisk [options]...
@@ -27,19 +23,19 @@ Options:
    --list                    list all available applets
    --daemon                  manually start magisk daemon
    --remove-modules          remove all modules and reboot
-   --[init trigger]          start service for init trigger
 
 Advanced Options (Internal APIs):
+   --[init trigger]          start service for init trigger
+                             Supported init triggers:
+                             post-fs-data, service, boot-complete
    --unlock-blocks           set BLKROSET flag to OFF for all block devices
    --restorecon              restore selinux context on Magisk files
    --clone-attr SRC DEST     clone permission, owner, and selinux context
    --clone SRC DEST          clone SRC to DEST
    --sqlite SQL              exec SQL commands to Magisk database
+   --path                    print Magisk tmpfs mount path
 
-Supported init triggers:
-   post-fs-data, service, boot-complete
-
-Supported applets:
+Available applets:
 )EOF");
 
 	for (int i = 0; applet_names[i]; ++i)
@@ -74,7 +70,6 @@ int magisk_main(int argc, char *argv[]) {
 		unlock_blocks();
 		return 0;
 	} else if (argv[1] == "--restorecon"sv) {
-		restore_rootcon();
 		restorecon();
 		return 0;
 	} else if (argc >= 4 && argv[1] == "--clone-attr"sv) {;
@@ -115,6 +110,12 @@ int magisk_main(int argc, char *argv[]) {
 		int fd = connect_daemon();
 		write_int(fd, REMOVE_MODULES);
 		return read_int(fd);
+	} else if (argv[1] == "--path"sv) {
+		int fd = connect_daemon();
+		write_int(fd, GET_PATH);
+		char *path = read_string(fd);
+		printf("%s\n", path);
+		return 0;
 	}
 #if 0
 	/* Entry point for testing stuffs */

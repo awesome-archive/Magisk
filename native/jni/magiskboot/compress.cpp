@@ -13,11 +13,10 @@
 #include <lz4frame.h>
 #include <lz4hc.h>
 
-#include <logging.h>
-#include <utils.h>
+#include <utils.hpp>
 
-#include "magiskboot.h"
-#include "compress.h"
+#include "magiskboot.hpp"
+#include "compress.hpp"
 
 using namespace std;
 
@@ -563,10 +562,10 @@ void decompress(char *infile, const char *outfile) {
 		if (!strm) {
 			format_t type = check_fmt(buf, len);
 
+			fprintf(stderr, "Detected format: [%s]\n", fmt2name[type]);
+
 			if (!COMPRESSED(type))
 				LOGE("Input file is not a supported compressed type!\n");
-
-			fprintf(stderr, "Detected format: [%s]\n", fmt2name[type]);
 
 			/* If user does not provide outfile, infile has to be either
 	 		* <path>.[ext], or '-'. Outfile will be either <path> or '-'.
